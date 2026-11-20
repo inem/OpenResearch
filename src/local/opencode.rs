@@ -358,19 +358,34 @@ pub fn ensure_playbook(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    let project_state = ProjectState::load(&project.id)?;
-    std::fs::write(&playbook, playbook_md(project, &project_state))
+    let profile = super::domain_profile::active()?;
+    let instructions = match profile {
+        Some(profile) => profile.render(project),
+        None => playbook_md(project, &ProjectState::load(&project.id)?),
+    };
+    std::fs::write(&playbook, instructions)
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
-        super::agent_skills::ensure_session_skills(&workdir, dir)?;
+        match profile {
+            Some(profile) => super::agent_skills::ensure_selected_session_skills(
+                &workdir,
+                dir,
+                &profile.skills(),
+            )?,
+            None => super::agent_skills::ensure_session_skills(&workdir, dir)?,
+        }
         // Explicit uploads land beside the built-ins; discovered skills stay native.
         super::user_skills::write_into_session(&workdir, dir)?;
     }
     // LaTeX templates the agent copies from, written fresh for the same reason —
     // and independent of the skills dir, since no harness owns them.
-    super::latex_templates::write_into_session(&workdir)?;
+    if let Some(profile) = profile {
+        profile.write_resources(&workdir)?;
+    } else {
+        super::latex_templates::write_into_session(&workdir)?;
+    }
     // One shared exclude covers every worktree.
     exclude_agent_files(Path::new(&project.repo_path));
     // The playbook points the agent at the artifacts dir — make sure it exists.

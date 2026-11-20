@@ -1,0 +1,36 @@
+id: content-from-sessions
+version: 1
+purpose: Create a grounded draft from selected past conversations.
+entities:
+  source:
+    required: [id, ref, text]
+    meaning: A bounded original excerpt with a resolvable reference.
+  claim:
+    required: [id, text, kind, source_ids]
+    kinds: [observation, interpretation, unsupported]
+    optional: [quote]
+    meaning: A proposed statement, with its evidence status preserved.
+  draft:
+    required: [id, path, claim_ids]
+    meaning: An editable content artifact using explicitly selected claims.
+  review:
+    required: [id, draft_id, status, issues]
+    statuses: [needs_work, ready_for_user]
+relations:
+  - claim.source_ids -> source.id
+  - draft.claim_ids -> claim.id
+  - review.draft_id -> draft.id
+workflow:
+  - Select source excerpts for the user's intended audience and purpose.
+  - Separate supported statements, interpretations and missing evidence.
+  - Form a brief and write a draft using the selected claims.
+  - Review evidence, clarity and audience fit; retain unresolved issues.
+completion:
+  - A draft exists and references the claims it uses.
+  - A review exists and identifies remaining issues.
+  - The user can follow each supported claim to its source excerpt.
+tool_bindings:
+  retrieve: Use an available session-reader; no specific connector is assumed.
+  write: Use the agent's normal file tools in the current project.
+  structural_check: python3 .openresearch/domain/check-state.py content-state.json
+  presentation: OpenResearch project artifacts and normal file links.

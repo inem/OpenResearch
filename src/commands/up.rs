@@ -72,6 +72,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     if !args.desktop_app && !args.remote_host && !args.headless {
         let data_dir = crate::commands::remote_host::canonical_data_dir()?;
+        local::domain_profile::check_data_dir(&data_dir, false)?;
         if let Some(server) =
             crate::commands::remote_host::ServerDescriptor::live(&data_dir).await?
         {
@@ -99,6 +100,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let data_dir = crate::commands::remote_host::canonical_data_dir()?;
     // The engine lock: one engine per data directory.
     let dashboard_lock = DashboardLock::acquire(&data_dir)?;
+    local::domain_profile::check_data_dir(&data_dir, true)?;
     // A laptop attached to an earlier host may have signed out since.
     if persistent_host {
         if let Err(error) = crate::alphaxiv::forget_forwarded() {

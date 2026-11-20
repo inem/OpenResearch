@@ -237,6 +237,14 @@ OpenCode runs local inference over connections to OpenAI-compatible servers (`sr
 
 ## Permissions
 
+The experimental `ORX_AGENT_PROFILE` override replaces the playbook and selects
+bundled skills at the shared preparation point for every harness. Its TOML
+manifest and resources are snapshotted at startup; custom profiles require a
+fresh data directory, whose content binding prevents resuming those chats
+under changed instructions. The default research path is unchanged. This
+selects guidance, not tool permissions: the existing CLI and MCP tools remain
+available. See [domain profiles](../examples/domain-profiles/README.md).
+
 Each agent keeps its own permission modes, and orx exposes those the harness advertises. A tool call needing approval becomes a prompt part:
 
 User-configured ACP agents also have a client approval setting: Ask (the default) or Full access.

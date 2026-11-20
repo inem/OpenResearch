@@ -21,6 +21,7 @@ pub mod claude;
 pub mod codex;
 pub mod datadir;
 pub mod demo;
+pub(crate) mod domain_profile;
 pub mod experiments;
 pub mod files;
 pub mod git;

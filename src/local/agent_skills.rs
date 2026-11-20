@@ -336,6 +336,14 @@ pub fn find_resource(
 /// playbook — zero drift). Returns `Err` on the first write failure; the caller
 /// treats it like a playbook-write error.
 pub fn ensure_session_skills(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
+    ensure_selected_session_skills(worktree, skills_dir_rel, &skills(SkillSet::Local))
+}
+
+pub(crate) fn ensure_selected_session_skills(
+    worktree: &Path,
+    skills_dir_rel: &str,
+    selected: &[&AgentSkill],
+) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
     for name in RETIRED_SKILL_NAMES {
         let dir = base.join(name);
@@ -352,6 +360,9 @@ pub fn ensure_session_skills(worktree: &Path, skills_dir_rel: &str) -> Result<()
         if dir.exists() {
             std::fs::remove_dir_all(&dir)
                 .map_err(|e| anyhow!("Could not refresh {}: {}", dir.display(), e))?;
+        }
+        if !selected.iter().any(|chosen| chosen.name == skill.name) {
+            continue;
         }
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
