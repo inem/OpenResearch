@@ -509,6 +509,9 @@ impl SkillDiscovery {
 /// global skills dir, plus the skills that come with its installed plugins.
 /// Sorted by name (then origin) so the first of a duplicated name always wins.
 fn discover_mirrored() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
+    if super::domain_profile::configured() {
+        return (Vec::new(), Vec::new());
+    }
     let mut out = Vec::new();
     let mut reports = Vec::new();
     for harness in registry() {
@@ -644,6 +647,9 @@ fn collect_mirrored(
 
 /// Uploads and native skills, one per name (uploads win), with discovery reports.
 pub fn list() -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
+    if super::domain_profile::configured() {
+        return (Vec::new(), Vec::new());
+    }
     let (skills, reports) = discover_mirrored();
     catalog_in(&root(), &skills, reports)
 }
@@ -692,10 +698,16 @@ fn list_uploaded_in(root: &Path) -> Vec<UserSkill> {
 }
 
 pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
+    if super::domain_profile::configured() {
+        return Vec::new();
+    }
     list_in(&root(), &native_skills(harness))
 }
 
 pub fn list_project_skills(repo: &Path, harness: Option<&str>) -> Vec<UserSkill> {
+    if super::domain_profile::configured() {
+        return Vec::new();
+    }
     let Some(dir) = harness
         .and_then(super::harness::chat_harness)
         .and_then(|agent| agent.session_skills_dir())
@@ -965,6 +977,9 @@ const MANAGED_MANIFEST: &str = ".orx-user-skills";
 /// longer applies is pruned, and one we don't own is left alone — so a session's
 /// skills track their sources with no drift and no collateral damage.
 pub fn write_into_session(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
+    if super::domain_profile::configured() {
+        return Ok(());
+    }
     write_into_session_in(&root(), worktree, skills_dir_rel)
 }
 

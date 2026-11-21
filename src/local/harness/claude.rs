@@ -418,6 +418,9 @@ async fn probe_auth_and_ultracode(
 
 /// Points a probe at a profile's home and its own Keychain entry.
 fn profile_env(cmd: &mut Command, home: Option<&Path>) -> Result<()> {
+    if crate::local::domain_profile::configured() {
+        cmd.arg("--disable-slash-commands");
+    }
     if let Some(home) = home {
         cmd.env("CLAUDE_CONFIG_DIR", home)
             .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
@@ -1303,6 +1306,9 @@ async fn claude_one_shot_output(
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
+    if crate::local::domain_profile::configured() {
+        cmd.arg("--disable-slash-commands");
+    }
     let (home, name) = if let Some(profile) = request.profile {
         crate::local::agent_profiles::home(profile, "claude-code")?;
         let env = crate::local::agent_profiles::login_env(profile)?;
@@ -3659,6 +3665,18 @@ mod tests {
     #[test]
     #[ignore = "diagnostic: requires ORX_TEST_CLAUDE_BINARY; no model requests or real credentials"]
     fn private_settings_real_claude_probe() {
+        real_claude_settings_probe(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "diagnostic: requires ORX_TEST_CLAUDE_BINARY; no model requests or real credentials"]
+    fn profile_skills_real_claude_probe() {
+        real_claude_settings_probe(true);
+    }
+
+    #[cfg(unix)]
+    fn real_claude_settings_probe(profile_only: bool) {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -3666,6 +3684,16 @@ mod tests {
         let bin = PathBuf::from(
             std::env::var_os("ORX_TEST_CLAUDE_BINARY").expect("ORX_TEST_CLAUDE_BINARY"),
         );
+        if profile_only {
+            let root = crate::config::test_home();
+            std::fs::write(
+                root.join("playbook.md"),
+                "Use the explicit profile catalog.",
+            )
+            .unwrap();
+            std::fs::write(root.join("profile.toml"), "version = 1\nname = 'skills-probe'\nplaybook = 'playbook.md'\nbundled_skills = ['agent-delegation']\n").unwrap();
+            std::env::set_var("ORX_AGENT_PROFILE", root.join("profile.toml"));
+        }
         let owner = native_store::claude_home(NativeStore::Legacy);
         let private = native_store::prepare_claude(NativeStore::Isolated).unwrap();
         for (home, name) in [(&owner, "outside-sentinel"), (&private, "inside-sentinel")] {
@@ -3681,11 +3709,15 @@ mod tests {
         let text = response.to_string();
         let own = text.contains("inside-sentinel");
         let outside = text.contains("outside-sentinel");
-        let report = json!({"model_calls":0,"credentials":"none; isolated test namespace","instance_skill_visible":own,"global_skill_visible":outside});
-        if let Some(path) = std::env::var_os("ORX_CLAUDE_ISOLATION_REPORT_FILE") {
+        let report = json!({"model_calls":0,"credentials":"none; isolated test namespace","profile_only":profile_only,"instance_skill_visible":own,"global_skill_visible":outside});
+        if let Some(path) = std::env::var_os(if profile_only {
+            "ORX_CLAUDE_PROFILE_REPORT_FILE"
+        } else {
+            "ORX_CLAUDE_ISOLATION_REPORT_FILE"
+        }) {
             std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
-        assert!(own, "Claude initialization must expose the private skill");
+        assert_eq!(own, !profile_only, "Automatic skills must be disabled for custom profiles; their catalog travels in the playbook");
         assert!(
             !outside,
             "Claude initialization must not expose the global skill"

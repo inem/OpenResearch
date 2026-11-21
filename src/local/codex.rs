@@ -876,6 +876,9 @@ async fn handshake(client: &CodexClient) -> Result<()> {
 /// Codex also scans the OS user's .agents directory independently of its config home.
 pub(crate) async fn restrict_instance_skills(client: &CodexClient, workspace: &Path) -> Result<()> {
     let root = crate::paths::canonicalize(crate::store::data_dir())?;
+    let profile_paths = super::domain_profile::active()?
+        .map(|profile| profile.skill_paths(workspace, ".agents/skills"))
+        .transpose()?;
     for pass in 0..2 {
         let response = client
             .request(
@@ -910,7 +913,12 @@ pub(crate) async fn restrict_instance_skills(client: &CodexClient, workspace: &P
                 let path = skill["path"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Codex skill inventory has no skill path"))?;
-                if !crate::paths::canonicalize(Path::new(path))?.starts_with(&root) {
+                let resolved = crate::paths::canonicalize(Path::new(path))?;
+                let allowed = profile_paths.as_ref().map_or_else(
+                    || resolved.starts_with(&root),
+                    |paths| paths.contains(&resolved),
+                );
+                if !allowed {
                     outside.push(path.to_owned());
                 }
             }
@@ -919,7 +927,7 @@ pub(crate) async fn restrict_instance_skills(client: &CodexClient, workspace: &P
             return Ok(());
         }
         if pass == 1 {
-            return Err(anyhow!("Codex still enables skills outside this instance after disabling them; the turn was not started"));
+            return Err(anyhow!("Codex still enables skills outside the configured set after disabling them; the turn was not started"));
         }
         for path in outside {
             client
@@ -1497,6 +1505,18 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "diagnostic: requires ORX_TEST_CODEX_BINARY; no model requests or real credentials"]
     fn private_settings_real_codex_probe() {
+        real_codex_settings_probe(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "diagnostic: requires ORX_TEST_CODEX_BINARY; no model requests or real credentials"]
+    fn profile_skills_real_codex_probe() {
+        real_codex_settings_probe(true);
+    }
+
+    #[cfg(unix)]
+    fn real_codex_settings_probe(profile_only: bool) {
         if !crate::config::in_test_child(&[]) {
             return;
         }
@@ -1524,6 +1544,22 @@ pub(crate) mod tests {
         .unwrap();
         let workspace = root.join("probe-workspace");
         std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        if profile_only {
+            std::fs::write(
+                root.join("playbook.md"),
+                "Work with this profile's explicit skills.",
+            )
+            .unwrap();
+            std::fs::write(root.join("profile.toml"), "version = 1\nname = 'skills-probe'\nplaybook = 'playbook.md'\nbundled_skills = ['agent-delegation']\n").unwrap();
+            std::env::set_var("ORX_AGENT_PROFILE", root.join("profile.toml"));
+            let profile = crate::local::domain_profile::active().unwrap().unwrap();
+            crate::local::agent_skills::ensure_selected_session_skills(
+                &workspace,
+                ".agents/skills",
+                &profile.skills(),
+            )
+            .unwrap();
+        }
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let reports = runtime.block_on(async {
             let mut reports = Vec::new();
@@ -1544,7 +1580,7 @@ pub(crate) mod tests {
                     let auth: Value = serde_json::from_slice(&std::fs::read(owner.join("auth.json"))?)?;
                     let shared_write = auth["OPENAI_API_KEY"] == format!("sk-synthetic-{name}");
                     let global_skill_loaded = skills["data"].as_array().is_some_and(|data| data.iter().any(|row| row["skills"].as_array().is_some_and(|skills| skills.iter().any(|skill| skill["name"] == "outside-sentinel" && skill["enabled"] != false))));
-                    Ok(json!({"instance":name,"expected_effort":effort,"observed_effort":config["config"]["model_reasoning_effort"],"auth_write_reached_owner":shared_write,"auth_link_survived":home.join("auth.json").is_symlink(),"global_skill_loaded_before":global_skill_loaded,"instance_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "inside-sentinel" && skill["enabled"] == true)),"global_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "outside-sentinel" && skill["enabled"] == true)),"login_succeeded":login.get("type").is_some()}))
+                    Ok(json!({"instance":name,"expected_effort":effort,"observed_effort":config["config"]["model_reasoning_effort"],"auth_write_reached_owner":shared_write,"auth_link_survived":home.join("auth.json").is_symlink(),"global_skill_loaded_before":global_skill_loaded,"profile_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "orx-agent-delegation" && skill["enabled"] == true)),"instance_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "inside-sentinel" && skill["enabled"] == true)),"global_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "outside-sentinel" && skill["enabled"] == true)),"login_succeeded":login.get("type").is_some()}))
                 }.await;
                 client.terminate().await;
                 native_store::prepare_codex_links(&home, &owner, true).unwrap();
@@ -1552,8 +1588,12 @@ pub(crate) mod tests {
             }
             reports
         });
-        let report = json!({"model_calls":0,"credentials":"synthetic only","instances":reports});
-        if let Some(path) = std::env::var_os("ORX_ISOLATION_REPORT_FILE") {
+        let report = json!({"model_calls":0,"credentials":"synthetic only","profile_only":profile_only,"instances":reports});
+        if let Some(path) = std::env::var_os(if profile_only {
+            "ORX_PROFILE_ISOLATION_REPORT_FILE"
+        } else {
+            "ORX_ISOLATION_REPORT_FILE"
+        }) {
             std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
         for row in &reports {
@@ -1565,7 +1605,8 @@ pub(crate) mod tests {
             assert_eq!(row["auth_link_survived"], true);
             assert_eq!(row["global_skill_loaded_before"], true);
             assert_eq!(row["global_skill_enabled_after"], false);
-            assert_eq!(row["instance_skill_enabled_after"], true);
+            assert_eq!(row["instance_skill_enabled_after"], !profile_only);
+            assert_eq!(row["profile_skill_enabled_after"], profile_only);
         }
     }
 

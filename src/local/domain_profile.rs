@@ -32,6 +32,10 @@ pub(crate) struct Profile {
 
 static ACTIVE: OnceCell<Option<Profile>> = OnceCell::new();
 
+pub(crate) fn configured() -> bool {
+    std::env::var_os("ORX_AGENT_PROFILE").is_some()
+}
+
 pub(crate) fn active() -> Result<Option<&'static Profile>> {
     let profile = ACTIVE.get_or_try_init(|| -> Result<Option<Profile>> {
         match std::env::var_os("ORX_AGENT_PROFILE") {
@@ -113,8 +117,23 @@ impl Profile {
             .collect()
     }
 
-    pub(crate) fn render(&self, project: &LocalProject) -> String {
-        format!(
+    pub(crate) fn skill_paths(
+        &self,
+        worktree: &Path,
+        dir: &str,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let mut paths = Vec::new();
+        for skill in self.skills() {
+            let path = worktree.join(dir).join(skill.name).join("SKILL.md");
+            if path.try_exists()? {
+                paths.push(crate::paths::canonicalize(path)?);
+            }
+        }
+        Ok(paths)
+    }
+
+    pub(crate) fn render(&self, project: &LocalProject, skills_dir: &str) -> String {
+        let mut text = format!(
             "# Agent profile: {}\n\n{}\n\n## Workspace contract\n\n\
              Project: {} (id: {}). You work in this chat's private Git worktree.\n\
              Durable outputs belong in: {}\n\
@@ -126,7 +145,18 @@ impl Profile {
              Profile resources are under .openresearch/domain/ in this worktree.\n",
             self.name, self.playbook, project.name, project.id,
             super::files::files_dir(project).display()
-        )
+        );
+        text.push_str("\n## Profile skills\n\nThis profile supplies the complete skill set below. Do not discover or import additional skills from the machine, other sessions, uploads or plugins. Read the listed SKILL.md when its capability is needed.\n\n");
+        for skill in self.skills() {
+            text.push_str(&format!(
+                "- {}: {} — `{}/{}/SKILL.md`\n",
+                skill.name, skill.description, skills_dir, skill.name
+            ));
+        }
+        if self.bundled_skills.is_empty() {
+            text.push_str("This profile supplies no skills.\n");
+        }
+        text
     }
 
     pub(crate) fn write_resources(&self, worktree: &Path) -> Result<()> {
@@ -156,7 +186,10 @@ pub(crate) fn check_data_dir(data_dir: &Path, bind: bool) -> Result<()> {
 
 fn check_binding(data_dir: &Path, profile: Option<&Profile>, bind: bool) -> Result<()> {
     let expected = match profile {
-        Some(profile) => format!("{:x}", Sha256::digest(serde_json::to_vec(profile)?)),
+        Some(profile) => format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&("profile-skills-v1", profile))?)
+        ),
         None => "research".to_string(),
     };
     let path = data_dir.join("agent-domain-profile.json");
@@ -165,7 +198,7 @@ fn check_binding(data_dir: &Path, profile: Option<&Profile>, bind: bool) -> Resu
             let saved: String = serde_json::from_str(&content)
                 .with_context(|| format!("Could not read profile binding {}", path.display()))?;
             if saved != expected {
-                return Err(anyhow!("This data directory belongs to a different agent profile. Start with the original profile or choose a new ORX_DATA_DIR."));
+                return Err(anyhow!("This data directory belongs to a different agent profile or profile policy. Use its original application/profile or choose a new ORX_DATA_DIR."));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -244,11 +277,88 @@ mod tests {
     }
 
     #[test]
+    fn profile_catalog_and_allowed_paths_are_explicit() {
+        let fixture = Fixture::new();
+        let profile = fixture
+            .load("bundled_skills = ['agent-delegation']")
+            .unwrap();
+        let worktree = fixture.0.join("worktree");
+        agent_skills::ensure_selected_session_skills(
+            &worktree,
+            ".agents/skills",
+            &profile.skills(),
+        )
+        .unwrap();
+        let extra = worktree.join(".agents/skills/not-in-profile");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(extra.join("SKILL.md"), "unselected skill").unwrap();
+        let paths = profile.skill_paths(&worktree, ".agents/skills").unwrap();
+        assert_eq!(
+            paths,
+            vec![crate::paths::canonicalize(
+                worktree.join(".agents/skills/orx-agent-delegation/SKILL.md")
+            )
+            .unwrap()]
+        );
+        let text = profile.render(
+            &super::super::agent_text::sample_project(),
+            ".agents/skills",
+        );
+        assert!(text.contains(".agents/skills/orx-agent-delegation/SKILL.md"));
+        assert!(!text.contains("not-in-profile"));
+        assert!(fixture
+            .load("bundled_skills = []")
+            .unwrap()
+            .skill_paths(&worktree, ".agents/skills")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn old_profile_context_cannot_resume_under_the_closed_skill_policy() {
+        let fixture = Fixture::new();
+        let profile = fixture.load("bundled_skills = []").unwrap();
+        let old = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&profile).unwrap())
+        );
+        std::fs::write(
+            fixture.0.join("agent-domain-profile.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        assert!(check_binding(&fixture.0, Some(&profile), false).is_err());
+    }
+
+    #[test]
+    fn profiles_do_not_import_uploaded_or_native_skills() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        let fixture = Fixture::new();
+        fixture.load("bundled_skills = []").unwrap();
+        let content = b"---\nname: outside-upload\ndescription: Synthetic uploaded skill.\n---\nOutside the profile.\n";
+        super::super::user_skills::save_skill_md(content).unwrap();
+        assert!(super::super::user_skills::list_for_harness(None)
+            .iter()
+            .any(|s| s.name == "outside-upload"));
+        std::env::set_var("ORX_AGENT_PROFILE", fixture.0.join("profile.toml"));
+        assert!(super::super::user_skills::list().0.is_empty());
+        assert!(super::super::user_skills::list_for_harness(None).is_empty());
+        let worktree = fixture.0.join("worktree");
+        super::super::user_skills::write_into_session(&worktree, ".agents/skills").unwrap();
+        assert!(!worktree.join(".agents/skills/outside-upload").exists());
+        assert!(super::super::user_skills::read_markdown("outside-upload")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
     fn custom_playbook_replaces_research_and_keeps_project_context() {
         let fixture = Fixture::new();
         let profile = fixture.load("bundled_skills = []").unwrap();
         let project = super::super::agent_text::sample_project();
-        let rendered = profile.render(&project);
+        let rendered = profile.render(&project, ".agents/skills");
         assert!(rendered.contains(&profile.playbook));
         assert!(rendered.contains(&project.id));
         assert!(rendered.contains(&project.name));

@@ -906,6 +906,9 @@ async fn spawn_client(
     if crate::local::agent_isolation::enabled() {
         cmd.args(["--setting-sources", "user", "--strict-mcp-config"]);
     }
+    if crate::local::domain_profile::configured() {
+        cmd.arg("--disable-slash-commands");
+    }
     if let Some(model) = &spec.config.model {
         cmd.args(["--model", model]);
     }

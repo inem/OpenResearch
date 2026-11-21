@@ -56,6 +56,9 @@ fn check_binding(data: &Path, private: bool, bind: bool) -> Result<()> {
 }
 
 pub(crate) fn reject_legacy(store: super::native_store::NativeStore) -> Result<()> {
+    if super::domain_profile::configured() && !enabled() {
+        return Err(anyhow!("Custom Claude/Codex profiles require ORX_PRIVATE_AGENT_SETTINGS=1 and a fresh instance directory; their skill policy must not rewrite shared agent settings."));
+    }
     if enabled() && store == super::native_store::NativeStore::Legacy {
         return Err(anyhow!("This instance cannot resume a chat in the shared agent home. Start a new chat in this instance."));
     }

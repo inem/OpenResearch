@@ -70,9 +70,9 @@ managed links. The ordinary mode is unchanged.
 | Claude configuration | Private settings, skills, plugins, history and `.claude.json`; no global MCP/project-state copy. The shared account's secure-storage namespace is passed separately. The file credential fallback is the only linked file. |
 | Codex configuration | Only `auth.json` is linked to the selected default account owner; no global config, skills, plugins or memory links. Native app-server uses file credential storage. File links are required; no hard-link/copy fallback pretending to share refreshed credentials. |
 | Credential conflict | An unexpectedly replaced credential bridge or inherited settings link causes an error. Private files are never adopted back into the account owner's configuration. |
-| Codex skill discovery | Its native loader independently scans the OS user's `.agents/skills`. Before each normal turn, ORX lists skills, disables enabled paths outside the canonical instance data directory through `skills/config/write`, then lists again. Unknown/error/remaining external skills stop the turn. Instance skills stay enabled. The one-shot path is inspected too. |
-| Claude launch | Uses private user settings and explicit MCP configuration; project/local settings are excluded from settings-source selection. Detection and model-catalog probes also use the private config home with the shared sign-in namespace. |
-| ORX skill picker | Discovers Claude/Codex skills and plugins from the instance homes. It does not mirror other agents' global skills. |
+| Codex skill discovery | Its native loader independently scans the OS user's `.agents/skills`. Before each normal turn, ORX lists skills, disables enabled paths outside the canonical instance data directory through `skills/config/write`, then lists again. Unknown/error/remaining external skills stop the turn. Without a domain profile, instance skills stay enabled. With a profile, only its declared skill files in the current worktree are allowed; unrelated files inside the instance are disabled too. The one-shot path is inspected too. |
+| Claude launch | Uses private user settings and explicit MCP configuration; project/local settings are excluded from settings-source selection. Detection and model-catalog probes also use the private config home with the shared sign-in namespace. Custom profiles disable native skill/command auto-loading and supply their explicit catalog through the playbook. |
+| ORX skill picker | Custom profiles do not discover/import uploaded, project, native or plugin skills. The profile is the complete catalog. Without a custom profile, private mode discovers only instance-owned Claude/Codex skills. |
 | Environment | All ORX saved-env read/write/remove paths use the instance file. Agent preparation removes inherited provider-prefixed variables before applying instance variables. A desktop shell probe may update PATH but cannot retarget instance directories. |
 | History | Native resume lookup does not search legacy user homes. Legacy execution is rejected; native chat import is unavailable in this mode. A future shared-session source must be an explicit reader, not legacy resume. |
 | Unsupported adapters | The mode exposes Claude/Codex only. Additional account profiles and legacy Codex exec chat are rejected. Ordinary mode retains their existing behavior. |
@@ -115,6 +115,26 @@ The tests run inside existing ORX temporary-home fixtures and never use real
 account credentials. Module tests also cover stale-policy rejection, atomic
 credential replacement by the owner, private env read/write/remove, exclusion
 of inherited provider variables and legacy-session lookup.
+
+## Closed profile skill sets
+
+A profile is the source of its skills, not a filter applied to a discovered
+collection. The profile-only native probes exercise the stricter policy:
+Codex keeps the declared `orx-agent-delegation` skill enabled while disabling
+both a global sentinel and an unlisted sentinel inside the instance. Claude's
+native skill auto-loading is off entirely; the selected catalog and file
+paths are rendered explicitly into the profile playbook instead. Module tests
+check that catalog, exclusion of uploaded skills without deleting the upload,
+and refusal to resume data bound under the older skill policy.
+
+```sh
+ORX_TEST_CODEX_BINARY="/absolute/path/to/codex" \
+ORX_TEST_CLAUDE_BINARY="/absolute/path/to/claude" \
+cargo test --locked --bin orx profile_skills_real_ -- --ignored
+```
+
+`ORX_PROFILE_ISOLATION_REPORT_FILE` and `ORX_CLAUDE_PROFILE_REPORT_FILE`
+optionally save sanitized reports. These checks make no model requests.
 
 ## Remaining acceptance work
 

@@ -201,7 +201,9 @@ The experimental domain-profile fork also supports
 It owns configuration/cache/env and Claude/Codex native homes inside that
 instance, shares only the default account's credential material, excludes
 legacy-session import/resume, and disables Codex skills outside the instance
-through its native API before turns. Other adapters and named accounts are
+through its native API before turns. With a custom profile, only that profile's
+declared skill files are enabled. Claude profiles disable native skill
+auto-loading and receive an explicit catalog in the playbook. Other adapters and named accounts are
 not enabled in this mode. This is configuration separation, not an OS access
 boundary; see [the implementation and native checks](../examples/domain-profiles/ISOLATION.md)
 for the exact limits. The behavior below describes ordinary mode.

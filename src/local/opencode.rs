@@ -359,8 +359,12 @@ pub fn ensure_playbook(
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
     let profile = super::domain_profile::active()?;
+    let session_skills_dir = session_skills_dir.or(profile.map(|_| ".openresearch/profile-skills"));
     let instructions = match profile {
-        Some(profile) => profile.render(project),
+        Some(profile) => profile.render(
+            project,
+            session_skills_dir.expect("profile skill directory"),
+        ),
         None => playbook_md(project, &ProjectState::load(&project.id)?),
     };
     std::fs::write(&playbook, instructions)

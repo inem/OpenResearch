@@ -12,10 +12,9 @@ is read by the agent, not interpreted as a database schema by OpenResearch.
 From the repository root, after building:
 
 ```sh
+ORX_PRIVATE_AGENT_SETTINGS=1 \
 ORX_AGENT_PROFILE="$PWD/examples/domain-profiles/content/profile.toml" \
 ORX_DATA_DIR="$PWD/.domain-content-data" \
-ORX_CACHE_DIR="$PWD/.domain-content-cache" \
-XDG_CONFIG_HOME="$PWD/.domain-content-config" \
 target/debug/orx up --no-browser --no-telemetry
 ```
 
@@ -23,8 +22,8 @@ Use directories outside a repository you intend to publish, or add these
 local directories to its excludes. The usual agent sign-ins are reused by
 the existing harnesses. A fresh config has its own onboarding.
 
-For the ordinary research mode, omit `ORX_AGENT_PROFILE` and use your ordinary
-data directory. Its playbook, full local skill set and LaTeX templates stay
+For ordinary research mode, omit `ORX_AGENT_PROFILE` and
+`ORX_PRIVATE_AGENT_SETTINGS`, and use your ordinary data directory. Its playbook, full local skill set and LaTeX templates stay
 unchanged.
 
 The profile is a TOML manifest, using the parser already in the application:
@@ -48,8 +47,22 @@ instructions. The binding travels with data-directory moves.
 
 The resources are installed fresh when the shared playbook preparation runs;
 like upstream, exactly when this happens depends on the harness lifecycle.
-Uploaded and native user skills retain their existing behavior. Unselected
-bundled skills are removed from the harness's managed skill directory.
+The profile supplies the complete skill set. Uploaded skills and discovered
+native/project/plugin skills are not added to it or offered by the user-skill
+picker. Unselected bundled skills are removed from the managed directory.
+The playbook carries an explicit catalog of the selected skills and their
+SKILL.md paths, so the agent can read them when needed.
+
+Claude custom profiles disable native skill/command auto-loading; their skills
+are supplied through that explicit catalog. Codex enables only the selected
+profile skill files in the current worktree, disabling even other skills
+inside the same instance. Its inventory calls enforce the declared set; they
+do not choose or import skills. Native Claude/Codex custom profiles require
+private-settings mode so this policy cannot alter a shared configuration.
+
+The profile binding includes this skill policy. Earlier experimental data
+folders must be opened with their original build or replaced with a fresh
+instance folder: a resumed native chat may retain previously imported skills.
 
 ## Limits of this experiment
 
