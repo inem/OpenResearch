@@ -30,6 +30,13 @@ The main thread owns the window's run loop, as every desktop toolkit requires, w
 
 ## Closing and quitting
 
+The domain-profile experiment adds opt-in native browser stores on macOS 14+.
+`ORX_DESKTOP_INSTANCE_ID` selects a persistent WebKit store independently of
+the server's data directory; custom-profile windows require it. The instance
+label prefixes the window title. This is not an agent-home isolation policy;
+the remaining sharing paths and test evidence are recorded in
+[instance isolation](../examples/domain-profiles/ISOLATION.md).
+
 **Work never stops without the user choosing it.** When the app runs its own server, a close and a quit take the same path:
 
 - **Nothing pending:** the app quits. Pending work is a chat the sidebar shows working, read from the turns the server holds in memory, an unfinished run, or a run whose result no chat has received. A store that cannot be read is a bug to log, not a question for the user, so the app quits.

@@ -404,6 +404,23 @@ pub fn run_dev(port: u16) {
     imp::run_event_loop(port, true);
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn desktop_instance_id(value: Option<&str>) -> crate::error::Result<Option<[u8; 16]>> {
+    value
+        .map(|value| {
+            let id = uuid::Uuid::parse_str(value).map_err(|error| {
+                crate::error::anyhow!("ORX_DESKTOP_INSTANCE_ID must be a UUID: {error}")
+            })?;
+            if id.is_nil() {
+                return Err(crate::error::anyhow!(
+                    "ORX_DESKTOP_INSTANCE_ID must not be the zero UUID"
+                ));
+            }
+            Ok(*id.as_bytes())
+        })
+        .transpose()
+}
+
 /// Adopt the user's shell environment in place of the one launchd or the desktop
 /// session handed us (see [`crate::local::shell_env`]).
 ///
@@ -956,13 +973,13 @@ mod imp {
     #[cfg(target_os = "macos")]
     use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol, Sel};
     #[cfg(target_os = "macos")]
-    use objc2::MainThreadMarker;
+    use objc2::{ClassType, MainThreadMarker};
     #[cfg(target_os = "macos")]
     use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSWritingToolsBehavior};
     #[cfg(target_os = "macos")]
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSString, NSUUID};
     #[cfg(target_os = "macos")]
-    use objc2_web_kit::WKWebViewConfiguration;
+    use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
     #[cfg(target_os = "macos")]
     use wry::{WebViewBuilderExtMacos, WebViewExtMacOS};
 
@@ -1039,6 +1056,27 @@ mod imp {
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
         #[cfg(not(target_os = "macos"))] launch_path: Option<String>,
     ) {
+        #[cfg(target_os = "macos")]
+        let instance_id = {
+            let raw = std::env::var_os("ORX_DESKTOP_INSTANCE_ID");
+            let result = match raw.as_ref() {
+                Some(value) => value.to_str()
+                    .ok_or_else(|| crate::error::anyhow!("ORX_DESKTOP_INSTANCE_ID must be UTF-8"))
+                    .and_then(|value| super::desktop_instance_id(Some(value))),
+                None if std::env::var_os("ORX_AGENT_PROFILE").is_some() => Err(crate::error::anyhow!(
+                    "A custom desktop profile needs a persistent ORX_DESKTOP_INSTANCE_ID to keep its browser data separate."
+                )),
+                None => Ok(None),
+            };
+            match result {
+                Ok(id) => id,
+                Err(error) => {
+                    crate::show_error_dialog(&error.to_string());
+                    return;
+                }
+            }
+        };
+        let instance_label = std::env::var("ORX_DESKTOP_INSTANCE_LABEL").unwrap_or_default();
         let origin = format!(
             "http://{}:{port}",
             if external_server {
@@ -1265,7 +1303,13 @@ mod imp {
             })
             .with_document_title_changed_handler({
                 let window = window.clone();
-                move |title| window.set_title(&title)
+                move |title| {
+                    window.set_title(&if instance_label.is_empty() {
+                        title
+                    } else {
+                        format!("{instance_label} — {title}")
+                    })
+                }
             })
             .with_on_page_load_handler({
                 let window = window.clone();
@@ -1402,6 +1446,25 @@ mod imp {
         let builder = {
             let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
             let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+            if let Some(identifier) = instance_id {
+                let supported: bool = unsafe {
+                    objc2::msg_send![WKWebsiteDataStore::class(), respondsToSelector: objc2::sel!(dataStoreForIdentifier:)]
+                };
+                if !supported {
+                    crate::show_error_dialog(
+                        "Separate desktop browser stores require macOS 14 or later.",
+                    );
+                    return;
+                }
+                // wry uses this configuration's store, ignoring its builder's store identifier.
+                unsafe {
+                    let store = WKWebsiteDataStore::dataStoreForIdentifier(
+                        &NSUUID::from_bytes(identifier),
+                        mtm,
+                    );
+                    configuration.setWebsiteDataStore(&store);
+                }
+            }
             if configuration.respondsToSelector(objc2::sel!(setWritingToolsBehavior:)) {
                 unsafe {
                     let _: () = objc2::msg_send![&*configuration, setWritingToolsBehavior: NSWritingToolsBehavior::None];
@@ -2540,6 +2603,23 @@ mod tests {
     };
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
+
+    #[test]
+    fn desktop_instance_ids_are_explicit_stable_and_nonzero() {
+        assert_eq!(super::desktop_instance_id(None).unwrap(), None);
+        assert!(super::desktop_instance_id(Some("not-a-uuid")).is_err());
+        assert!(super::desktop_instance_id(Some("00000000-0000-0000-0000-000000000000")).is_err());
+        let a = "730b86c0-01db-49ae-9d12-b12913703d89";
+        let b = "6090485d-c9bd-4696-a62a-deb2fd212965";
+        assert_eq!(
+            super::desktop_instance_id(Some(a)).unwrap(),
+            super::desktop_instance_id(Some(a)).unwrap()
+        );
+        assert_ne!(
+            super::desktop_instance_id(Some(a)).unwrap(),
+            super::desktop_instance_id(Some(b)).unwrap()
+        );
+    }
 
     #[test]
     fn close_alert_names_each_pending_item_under_what_quitting_does_to_it() {

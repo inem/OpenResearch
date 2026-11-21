@@ -88,7 +88,7 @@ class Server:
         with opener.open(request, timeout=25) as response:
             return json.load(response)
 
-    def create_chat(self):
+    def create_chat(self, name="Domain probe"):
         agent = checkout / "tests/fixtures/domain-profile-acp.py"
         harness = self.api("/api/harnesses/acp", {"name": "Domain recorder", "executable": sys.executable,
                                                 "arguments": [str(agent), str(self.record)]})["id"]
@@ -99,7 +99,7 @@ class Server:
         (repo / "source.txt").write_text("Synthetic source: keep source references with every draft.\n")
         for args in (("init", "-q"), ("add", "source.txt"), ("commit", "-qm", "Synthetic input")):
             subprocess.run(["git", *args], cwd=repo, env=self.env, check=True, capture_output=True)
-        project = self.api("/api/projects", {"name": "Domain probe", "path": str(repo), "githubSyncEnabled": False})["project"]["id"]
+        project = self.api("/api/projects", {"name": name, "path": str(repo), "githubSyncEnabled": False})["project"]["id"]
         self.session = self.api("/api/chat/sessions", {"projectId": project, "harness": harness, "model": "recorder"})["session"]["id"]
 
     def turn(self, number):
@@ -116,62 +116,67 @@ class Server:
         assert expected in result.stderr, result.stderr
 
 
-profile_dir = root / "profile"
-shutil.copytree(checkout / "examples/domain-profiles/content", profile_dir)
-profile_path = profile_dir / "profile.toml"
-servers = []
-try:
-    research = Server("research")
-    servers.append(research)
-    research.start()
-    research.create_chat()
-    default = research.turn(1)
-    default_text = default["files"][".openresearch/agent/autoresearch-local.md"]
-    assert "# OpenResearch agent" in default_text
-    assert "orx-experiment-tree" in default["skills"]
-    assert "orx-experiment-runs" in default["skills"]
-    research.stop()
-    research.rejects(dict(research.env, ORX_AGENT_PROFILE=str(profile_path)), "fresh ORX_DATA_DIR")
-    results["research"] = {"skills": default["skills"], "playbook": default_text, "existing_data_retarget_rejected": True}
+def main():
+    profile_dir = root / "profile"
+    shutil.copytree(checkout / "examples/domain-profiles/content", profile_dir)
+    profile_path = profile_dir / "profile.toml"
+    servers = []
+    try:
+        research = Server("research")
+        servers.append(research)
+        research.start()
+        research.create_chat()
+        default = research.turn(1)
+        default_text = default["files"][".openresearch/agent/autoresearch-local.md"]
+        assert "# OpenResearch agent" in default_text
+        assert "orx-experiment-tree" in default["skills"]
+        assert "orx-experiment-runs" in default["skills"]
+        research.stop()
+        research.rejects(dict(research.env, ORX_AGENT_PROFILE=str(profile_path)), "fresh ORX_DATA_DIR")
+        results["research"] = {"skills": default["skills"], "playbook": default_text, "existing_data_retarget_rejected": True}
 
-    content = Server("content", profile_path)
-    servers.append(content)
-    content.start()
-    content.create_chat()
-    first = content.turn(1)
-    text = first["files"][".openresearch/agent/autoresearch-local.md"]
-    assert "# Agent profile: content-from-sessions" in text
-    assert "Source, Claim, Draft and Review" in text
-    assert "# OpenResearch agent" not in text
-    assert "orx-experiment-runs" not in text
-    assert first["skills"] == ["orx-agent-delegation"], first["skills"]
-    worktree = Path(first["cwd"])
-    resource = worktree / ".openresearch/domain/domain.yaml"
-    original = resource.read_text()
-    (profile_dir / "domain.yaml").write_text("changed source after startup")
-    resource.write_text("local drift")
-    (worktree / ".openresearch/agent/autoresearch-local.md").write_text("local drift")
-    second = content.turn(2)
-    assert second["files"][".openresearch/agent/autoresearch-local.md"] == text
-    assert resource.read_text() == original
-    assert (worktree / ".openresearch/domain/check-state.py").is_file()
-    content.stop()
-    content.rejects(content.env, "different agent profile")
-    default_env = dict(content.env)
-    del default_env["ORX_AGENT_PROFILE"]
-    content.rejects(default_env, "different agent profile")
-    (profile_dir / "domain.yaml").write_text(original)
-    content.start()
-    third = content.turn(3)
-    assert third["files"][".openresearch/agent/autoresearch-local.md"] == text
-    results["content"] = {"skills": first["skills"], "playbook": text, "mcp_servers": first["servers"],
-                          "snapshot_immutable": True, "drift_refreshed": True, "restart_resumed": True,
-                          "changed_profile_rejected": True, "default_profile_rejected": True}
-    content.stop()
-    (root / "result.json").write_text(json.dumps(results, indent=2) + "\n")
-    print(json.dumps({"ok": True, "evidence": str(root / "result.json"), "research_skills": len(default["skills"]),
-                      "content_skills": first["skills"], "model_inference": False}, indent=2))
-finally:
-    for server in servers:
-        server.stop()
-    print("Probe files: " + str(root))
+        content = Server("content", profile_path)
+        servers.append(content)
+        content.start()
+        content.create_chat()
+        first = content.turn(1)
+        text = first["files"][".openresearch/agent/autoresearch-local.md"]
+        assert "# Agent profile: content-from-sessions" in text
+        assert "Source, Claim, Draft and Review" in text
+        assert "# OpenResearch agent" not in text
+        assert "orx-experiment-runs" not in text
+        assert first["skills"] == ["orx-agent-delegation"], first["skills"]
+        worktree = Path(first["cwd"])
+        resource = worktree / ".openresearch/domain/domain.yaml"
+        original = resource.read_text()
+        (profile_dir / "domain.yaml").write_text("changed source after startup")
+        resource.write_text("local drift")
+        (worktree / ".openresearch/agent/autoresearch-local.md").write_text("local drift")
+        second = content.turn(2)
+        assert second["files"][".openresearch/agent/autoresearch-local.md"] == text
+        assert resource.read_text() == original
+        assert (worktree / ".openresearch/domain/check-state.py").is_file()
+        content.stop()
+        content.rejects(content.env, "different agent profile")
+        default_env = dict(content.env)
+        del default_env["ORX_AGENT_PROFILE"]
+        content.rejects(default_env, "different agent profile")
+        (profile_dir / "domain.yaml").write_text(original)
+        content.start()
+        third = content.turn(3)
+        assert third["files"][".openresearch/agent/autoresearch-local.md"] == text
+        results["content"] = {"skills": first["skills"], "playbook": text, "mcp_servers": first["servers"],
+                              "snapshot_immutable": True, "drift_refreshed": True, "restart_resumed": True,
+                              "changed_profile_rejected": True, "default_profile_rejected": True}
+        content.stop()
+        (root / "result.json").write_text(json.dumps(results, indent=2) + "\n")
+        print(json.dumps({"ok": True, "evidence": str(root / "result.json"), "research_skills": len(default["skills"]),
+                          "content_skills": first["skills"], "model_inference": False}, indent=2))
+    finally:
+        for server in servers:
+            server.stop()
+        print("Probe files: " + str(root))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,8 @@
 # Experimental domain profiles
 
+For multiple native windows, see [instance isolation](ISOLATION.md): tested
+window/data boundaries and the agent settings that are still shared.
+
 A profile replaces the research playbook and selects which bundled skills
 are installed in chat worktrees. It also supplies files that agents can read
 or execute. The example works with Source → Claim → Draft → Review; its YAML

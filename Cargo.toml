@@ -148,8 +148,8 @@ gstreamer = { version = "0.21", optional = true }
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSTextCheckingClient", "NSGraphics", "NSView", "NSVisualEffectView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSAppleEventManager", "NSAppleEventDescriptor"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebViewConfiguration"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSUUID", "NSAppleEventManager", "NSAppleEventDescriptor"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebViewConfiguration", "WKWebsiteDataStore"] }
 muda = "0.20"
 # The Keychain item that keeps a saved SSH password (src/local/keychain.rs). Already in the tree via rustls-native-certs.
 security-framework = "3"
