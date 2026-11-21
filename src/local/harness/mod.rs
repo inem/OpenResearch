@@ -618,7 +618,11 @@ pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<
 
 /// Harness registration for dispatch, the session allowlist, and skills.
 pub fn registry() -> Vec<Box<dyn Harness>> {
-    registry_with_acp(crate::local::acp::registered_definitions())
+    let mut harnesses = registry_with_acp(crate::local::acp::registered_definitions());
+    if crate::local::agent_isolation::enabled() {
+        harnesses.retain(|harness| matches!(harness.id(), "claude-code" | "codex"));
+    }
+    harnesses
 }
 
 fn registry_with_acp(definitions: Vec<crate::local::acp::Definition>) -> Vec<Box<dyn Harness>> {
@@ -811,6 +815,9 @@ pub fn runs_on_acp_host(id: &str) -> bool {
 }
 
 pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    if crate::local::agent_isolation::enabled() && !matches!(id, "claude-code" | "codex") {
+        return None;
+    }
     if id.starts_with("acp:") {
         let state = Store::open()
             .ok()?

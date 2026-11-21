@@ -84,6 +84,11 @@ pub struct Credentials {
 }
 
 pub(crate) fn config_dir() -> PathBuf {
+    if crate::local::agent_isolation::enabled() {
+        if let Some(data) = std::env::var_os("ORX_DATA_DIR") {
+            return PathBuf::from(data).join("config");
+        }
+    }
     #[cfg(test)]
     let base = test_home().join(".config");
     #[cfg(not(test))]
@@ -691,8 +696,16 @@ pub fn set_github_default_prompt_seen(seen: bool) -> Result<()> {
 /// `orx` can't rely on the process environment alone. Parses only the exact
 /// format the api writes: `export KEY='value'` with `\` doubled and `'`
 /// written as `'\''`.
+fn synced_env_path() -> Option<PathBuf> {
+    if crate::local::agent_isolation::enabled() {
+        Some(crate::store::data_dir().join("env"))
+    } else {
+        home_dir().map(|home| home.join(".openresearch/env"))
+    }
+}
+
 pub fn synced_env_var(key: &str) -> Option<String> {
-    let path = home_dir()?.join(".openresearch").join("env");
+    let path = synced_env_path()?;
     let content = std::fs::read_to_string(path).ok()?;
     let prefix = format!("export {key}='");
     for line in content.lines() {
@@ -714,7 +727,7 @@ pub fn synced_env_var(key: &str) -> Option<String> {
 /// All vars in the synced env file, in file order (same format as
 /// `synced_env_var`). Malformed lines are skipped.
 pub fn list_synced_env() -> Vec<(String, String)> {
-    let Some(path) = home_dir().map(|h| h.join(".openresearch").join("env")) else {
+    let Some(path) = synced_env_path() else {
         return Vec::new();
     };
     let Ok(content) = std::fs::read_to_string(path) else {
@@ -844,7 +857,7 @@ fn stored_run_context(
 
 /// Drop `key`'s line from the synced env file. Missing file/key is a no-op.
 pub fn remove_synced_env_var(key: &str) -> Result<()> {
-    let Some(path) = home_dir().map(|h| h.join(".openresearch").join("env")) else {
+    let Some(path) = synced_env_path() else {
         return Ok(());
     };
     let Ok(existing) = std::fs::read_to_string(&path) else {
@@ -873,11 +886,11 @@ pub fn write_synced_env_var(key: &str, value: &str) -> Result<()> {
 
 pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
     use anyhow::anyhow;
-    let dir = home_dir()
-        .ok_or_else(|| anyhow!("no home directory"))?
-        .join(".openresearch");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("env");
+    let path = synced_env_path().ok_or_else(|| anyhow!("no home directory"))?;
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow!("env file has no directory"))?,
+    )?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     for (key, value) in values {

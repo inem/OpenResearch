@@ -923,6 +923,9 @@ pub(super) async fn bin_version(bin: &Path) -> Option<String> {
 /// sources `prepare_env` actually hands the harness child. Detecting only the
 /// former would report a working setup as signed out.
 pub(super) fn api_key(key: &str) -> Option<String> {
+    if crate::local::agent_isolation::enabled() {
+        return crate::config::synced_env_var(key);
+    }
     std::env::var(key)
         .ok()
         .map(|v| v.trim().to_string())

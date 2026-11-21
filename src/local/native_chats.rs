@@ -46,10 +46,13 @@ pub struct NativeMessage {
 
 /// Whether this harness keeps chats orx can read back at all.
 pub fn is_importable(harness: &str) -> bool {
-    matches!(harness, "claude-code" | "codex")
+    !super::agent_isolation::enabled() && matches!(harness, "claude-code" | "codex")
 }
 
 pub fn list(owned: &HashSet<String>, limit: usize) -> Vec<NativeChat> {
+    if super::agent_isolation::enabled() {
+        return Vec::new();
+    }
     let mut found: Vec<(i64, ChatSource)> = claude_sources()
         .into_iter()
         .chain(codex_sources())

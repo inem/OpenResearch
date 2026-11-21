@@ -150,6 +150,7 @@ impl Profile {
 // A resident agent cannot reliably replace instructions in its existing context.
 // Pin the whole isolated data directory instead of silently mixing domains.
 pub(crate) fn check_data_dir(data_dir: &Path, bind: bool) -> Result<()> {
+    super::agent_isolation::check_data_dir(data_dir, bind)?;
     check_binding(data_dir, active()?, bind)
 }
 

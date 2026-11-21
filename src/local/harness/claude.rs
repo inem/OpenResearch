@@ -190,7 +190,10 @@ async fn probe_auth_at(bin: &Path, sequence: u64, home: Option<&Path>) -> AuthPr
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
-    profile_env(&mut cmd, home);
+    if let Err(error) = profile_env(&mut cmd, home) {
+        eprintln!("orx: Claude private configuration: {error}");
+        return AuthProbe::unknown(sequence);
+    }
     match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
         Some(Ok(out)) => parse_auth_status(out.status.code(), &out.stdout, sequence),
         // A timeout or a spawn failure: no evidence of anything, least of all a
@@ -280,7 +283,7 @@ fn apply_env_credential_override(mut probe: AuthProbe, home: Option<&Path>) -> A
 /// it reads, its user settings' `env` included, tell a plan from the API; neither found is unknown.
 fn token_method(home: Option<&Path>) -> Option<&'static str> {
     let home = home.map_or_else(
-        || native_store::claude_home(NativeStore::Legacy),
+        || native_store::claude_home(crate::local::agent_isolation::config_store()),
         Path::to_path_buf,
     );
     let settings = read_json(home.join("settings.json"));
@@ -390,7 +393,10 @@ async fn probe_auth_and_ultracode(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     prepare_env(&mut cmd);
-    profile_env(&mut cmd, home);
+    if let Err(error) = profile_env(&mut cmd, home) {
+        eprintln!("orx: Claude private configuration: {error}");
+        return (AuthProbe::unknown(sequence), false);
+    }
     let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
         Some(Ok(out)) => out,
         _ => return (AuthProbe::unknown(sequence), false),
@@ -411,11 +417,22 @@ async fn probe_auth_and_ultracode(
 }
 
 /// Points a probe at a profile's home and its own Keychain entry.
-fn profile_env(cmd: &mut Command, home: Option<&Path>) {
+fn profile_env(cmd: &mut Command, home: Option<&Path>) -> Result<()> {
     if let Some(home) = home {
         cmd.env("CLAUDE_CONFIG_DIR", home)
             .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home);
+    } else if crate::local::agent_isolation::enabled() {
+        cmd.env(
+            "CLAUDE_CONFIG_DIR",
+            native_store::prepare_claude(NativeStore::Isolated)?,
+        )
+        .env(
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+            native_store::claude_secure_storage_config_dir(),
+        );
+        cmd.args(["--setting-sources", "user", "--strict-mcp-config"]);
     }
+    Ok(())
 }
 
 /// The `list_models` catalog, the same data Claude's `/model` menu renders.
@@ -464,7 +481,12 @@ async fn claude_control(
             "--verbose",
         ]);
         prepare_env(&mut cmd);
-        profile_env(&mut cmd, home.as_deref());
+        if let Err(error) = profile_env(&mut cmd, home.as_deref()) {
+            let _ = answered.send(Err(Unanswered::Spawn(std::io::Error::other(
+                error.to_string(),
+            ))));
+            return;
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -957,7 +979,7 @@ pub(crate) async fn external_model_catalog(
             (
                 parse_claude_model_list(&response, ultracode),
                 configured_model(&crate::local::native_store::claude_home(
-                    crate::local::native_store::NativeStore::Legacy,
+                    crate::local::agent_isolation::config_store(),
                 ))
                 .or_else(|| claude_default_model(&response)),
             )
@@ -1466,7 +1488,7 @@ impl ClaudeCode {
             // The speculated `list_models` response is parsed here, where the
             // ultracode verdict has landed.
             info.configured_model = configured_model(&crate::local::native_store::claude_home(
-                crate::local::native_store::NativeStore::Legacy,
+                crate::local::agent_isolation::config_store(),
             ))
             .or_else(|| spec_models.as_ref().and_then(claude_default_model));
             let models = spec_models.and_then(|resp| {
@@ -1772,7 +1794,9 @@ impl Harness for ClaudeCode {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(native_store::claude_home(NativeStore::Legacy))
+        Some(native_store::claude_home(
+            crate::local::agent_isolation::config_store(),
+        ))
     }
 
     fn native_skill_roots(&self) -> Vec<PathBuf> {
@@ -3630,6 +3654,43 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "diagnostic: requires ORX_TEST_CLAUDE_BINARY; no model requests or real credentials"]
+    fn private_settings_real_claude_probe() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_PRIVATE_AGENT_SETTINGS", "1");
+        let bin = PathBuf::from(
+            std::env::var_os("ORX_TEST_CLAUDE_BINARY").expect("ORX_TEST_CLAUDE_BINARY"),
+        );
+        let owner = native_store::claude_home(NativeStore::Legacy);
+        let private = native_store::prepare_claude(NativeStore::Isolated).unwrap();
+        for (home, name) in [(&owner, "outside-sentinel"), (&private, "inside-sentinel")] {
+            let skill = home.join("skills").join(name);
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(skill.join("SKILL.md"), format!("---\nname: {name}\ndescription: Synthetic isolation diagnostic skill.\n---\nSentinel.\n")).unwrap();
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let response = runtime
+            .block_on(claude_control(bin, None, json!({"subtype":"initialize"})))
+            .unwrap()
+            .unwrap();
+        let text = response.to_string();
+        let own = text.contains("inside-sentinel");
+        let outside = text.contains("outside-sentinel");
+        let report = json!({"model_calls":0,"credentials":"none; isolated test namespace","instance_skill_visible":own,"global_skill_visible":outside});
+        if let Some(path) = std::env::var_os("ORX_CLAUDE_ISOLATION_REPORT_FILE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        assert!(own, "Claude initialization must expose the private skill");
+        assert!(
+            !outside,
+            "Claude initialization must not expose the global skill"
+        );
+    }
 
     /// The lines Claude writes when it resumes on its own and replies `reply`.
     fn segment(reply: &str) -> Vec<Value> {

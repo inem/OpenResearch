@@ -196,6 +196,17 @@ an unreadable rollout fails that attempt without pinning a fallback model.
 
 ## Isolation
 
+The experimental domain-profile fork also supports
+`ORX_PRIVATE_AGENT_SETTINGS=1` with a fresh absolute `ORX_DATA_DIR`.
+It owns configuration/cache/env and Claude/Codex native homes inside that
+instance, shares only the default account's credential material, excludes
+legacy-session import/resume, and disables Codex skills outside the instance
+through its native API before turns. Other adapters and named accounts are
+not enabled in this mode. This is configuration separation, not an OS access
+boundary; see [the implementation and native checks](../examples/domain-profiles/ISOLATION.md)
+for the exact limits. The behavior below describes ordinary mode.
+
+
 An agent runs in the chat's worktree. **orx never edits the user's agent configuration.** What it adds (hooks, an MCP server, sandbox roots) goes through the agent's command line or a settings file of orx's own. Two exceptions stand: starting OpenCode rewrites the `orx` skill shim in the user's OpenCode skills directory, and removing a provider found in OpenCode deletes it from the user's OpenCode, as the user asked. orx's worktree files are Git-excluded, and a project's tracked agent config wins: OpenCode's config moves aside for a tracked `opencode.json`, and an Antigravity turn fails on a tracked `.agents/hooks.json`.
 
 Homes (`src/local/native_store.rs`) let an agent behave as the user set it up while its sessions stay out of the user's own:

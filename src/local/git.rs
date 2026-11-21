@@ -55,6 +55,9 @@ pub fn clone_path(owner: &str, repo: &str) -> PathBuf {
 }
 
 pub(crate) fn cache_root() -> PathBuf {
+    if super::agent_isolation::enabled() {
+        return crate::store::data_dir().join("cache");
+    }
     crate::local::shell_env::var("ORX_CACHE_DIR")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)

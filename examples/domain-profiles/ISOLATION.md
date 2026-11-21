@@ -32,7 +32,7 @@ The opt-in native window boundary is implemented for macOS 14+:
   Persist it in the future launcher's registry, across process restarts.
   Never reuse it for another instance or derive it from the domain name.
 - `ORX_DESKTOP_INSTANCE_LABEL` prefixes the native window title.
-- Custom-profile desktop windows require the UUID. Older macOS versions
+- Custom-profile and private-settings desktop windows require the UUID. Older macOS versions
   reject this mode instead of falling back to a shared store.
 - The existing `WKWebViewConfiguration` gets its own `WKWebsiteDataStore`.
   Setting only wry's builder identifier would not work here: wry uses the
@@ -45,69 +45,99 @@ launching, Windows/Linux single-instance behavior or production packaging.
 Keep an instance's HTTP origin stable as well as its browser-store UUID:
 changing its port changes the origin of localStorage and IndexedDB.
 
-## Remaining sharing paths found in the source
+## Private agent settings mode
 
-The native window fix does **not** isolate every agent setting. The following
-are source findings and implementation requirements, not completed features.
+The fork now has an opt-in implementation for the default Claude Code and
+Codex accounts:
 
-| Owner | Current coupling | Required boundary |
-| --- | --- | --- |
-| `src/local/native_store.rs`, `prepare_claude_links` | Links `settings.json`, `settings.local.json`, `CLAUDE.md`, `plugins`, `skills`, plus account files from the user's Claude home. | Private configuration home; link only the credential material needed by the selected account. Keep the existing secure-storage account namespace separate from the settings home. |
-| Same file, `prepare_codex_links` | Links almost every child of the user's Codex home except a denylist of session/runtime files. This includes configuration and customizations. | Replace that broad sharing policy with an explicit auth-only path for isolated instances. Their `config.toml`, instructions, skills and plugin state must be local files. |
-| `src/local/agent_profiles.rs`, `prepare_home_in` | Additional account profiles also call these linkers. Claude additionally synchronizes `mcpServers` from the main account file. | Apply the same split to named accounts; stop synchronizing global MCP settings into them. Preserve only required identity/auth fields. |
-| `src/local/harness/codex.rs`, `native_skill_roots`, `plugin_skills_dirs`; `src/local/user_skills.rs`, `discover_mirrored` | Discover global `~/.agents/skills`, legacy Codex skills and plugins separately from the isolated transcript home. | Point discovery at instance-owned roots. Verify the native CLI itself also excludes global discovery; merely hiding skills in the ORX picker is insufficient. |
-| `src/config.rs`, synced-env read/write/remove; `src/local/chat/mod.rs`, `prepare_env` | Settings → Environment reads/writes `~/.openresearch/env`; every child can receive this shared file. It is outside both the data directory and XDG config directory. | One env file per instance, consistently used by readers, writers, shell hooks and child preparation. Account auth must be resolved separately, not by importing the entire global env file. |
-| `src/local/shell_env.rs`, `var`; `src/commands/app.rs`, `hydrate_shell_env` | A desktop login-shell probe can override explicitly supplied data/config/cache variables. | A supervised instance's supplied locations must win. Import only the missing tool-discovery values the launcher allows; do not let shell startup retarget an active instance. |
-| `src/local/native_store.rs`, session lookup; `src/local/native_chats.rs` | Native session recovery can search the user's legacy stores; importing a native chat can retain its original store. | Instance chat execution must resume only instance-owned native sessions. A deliberate import must copy/rehydrate into the instance or remain an explicitly external read-only source. |
-| OpenCode, Cursor and generic ACP adapters | Their configuration discovery and sign-in mechanisms differ; ACP has no common isolated-home contract. | Separate adapter capabilities. Do not advertise complete isolation for an adapter until its configuration, memory, skills and resume behavior have been tested. |
+```sh
+ORX_PRIVATE_AGENT_SETTINGS=1 \
+ORX_AGENT_PROFILE="/absolute/path/to/content/profile.toml" \
+ORX_DATA_DIR="/absolute/path/to/instances/content-a" \
+target/debug/orx up --no-browser --no-telemetry
+```
 
-Project files such as `AGENTS.md`, `CLAUDE.md`, `.mcp.json` and native project
-settings are another input. They may be intentionally shared source material,
-but automatic customization import must be an explicit instance policy.
-Disabling global settings while silently loading equivalent project or parent
-directory settings would not establish the intended boundary.
+Use a different absolute data directory for each instance, including two
+instances of the same profile. ORX config, cache and its saved environment
+file live at `config/`, `cache/` and `env` inside that directory. The native
+homes remain `agents/claude` and `agents/codex`. A persistent
+`agent-settings-policy.json` binding rejects an old data directory and a
+restart with private mode removed. Private mode never attempts to adopt old
+managed links. The ordinary mode is unchanged.
 
-## Implementation contract
+| Boundary | Implemented behavior |
+| --- | --- |
+| Claude configuration | Private settings, skills, plugins, history and `.claude.json`; no global MCP/project-state copy. The shared account's secure-storage namespace is passed separately. The file credential fallback is the only linked file. |
+| Codex configuration | Only `auth.json` is linked to the selected default account owner; no global config, skills, plugins or memory links. Native app-server uses file credential storage. File links are required; no hard-link/copy fallback pretending to share refreshed credentials. |
+| Credential conflict | An unexpectedly replaced credential bridge or inherited settings link causes an error. Private files are never adopted back into the account owner's configuration. |
+| Codex skill discovery | Its native loader independently scans the OS user's `.agents/skills`. Before each normal turn, ORX lists skills, disables enabled paths outside the canonical instance data directory through `skills/config/write`, then lists again. Unknown/error/remaining external skills stop the turn. Instance skills stay enabled. The one-shot path is inspected too. |
+| Claude launch | Uses private user settings and explicit MCP configuration; project/local settings are excluded from settings-source selection. Detection and model-catalog probes also use the private config home with the shared sign-in namespace. |
+| ORX skill picker | Discovers Claude/Codex skills and plugins from the instance homes. It does not mirror other agents' global skills. |
+| Environment | All ORX saved-env read/write/remove paths use the instance file. Agent preparation removes inherited provider-prefixed variables before applying instance variables. A desktop shell probe may update PATH but cannot retarget instance directories. |
+| History | Native resume lookup does not search legacy user homes. Legacy execution is rejected; native chat import is unavailable in this mode. A future shared-session source must be an explicit reader, not legacy resume. |
+| Unsupported adapters | The mode exposes Claude/Codex only. Additional account profiles and legacy Codex exec chat are rejected. Ordinary mode retains their existing behavior. |
 
-The supervisor should resolve two independent objects before spawning:
+The filtering is a pre-turn configuration check, not a filesystem security
+boundary. Native Codex still inspects external skill metadata to enumerate and
+disable it. Changes made outside ORX during an active turn are not isolated by
+an OS namespace. Explicit source-file reads remain possible.
 
-1. **Account reference:** provider, account identity and access to the live
-   credential owner. Reuse the live sign-in, rather than copying an OAuth
-   token snapshot which may become stale after refresh. Where a provider
-   cannot separate auth from configuration, use an adapter-specific bridge
-   or report that mode as unsupported.
-2. **Instance workspace:** stable instance UUID, pinned domain version, private
-   ORX data/config/cache/env, private agent configuration and session homes,
-   private skill/plugin/memory roots, stable origin and native browser-store
-   UUID. Several instances of the same domain still get distinct workspaces.
+## Native checks performed
 
-Auth-only sharing needs an allowlist, not the current "share everything except
-history" denylist. Account removal/sign-out is a shared-account operation;
-closing an instance must not sign out the shared account. Token refresh must
-continue to reach the account owner.
+On macOS, Codex CLI **0.171.0** was exercised through the production ORX spawn
+and JSON-RPC code using synthetic accounts only. Two independent configuration
+homes reported different reasoning settings (`low` and `high`). In each:
 
-Start this mode with fresh instance directories. Existing managed links must
-be explicitly detached or the migration refused; skipping link creation does
-not remove links left by earlier launches. Include the policy/version in the
-instance binding so a restart cannot silently change its meaning.
+- a global sentinel skill was initially enabled despite the separate home;
+- ORX's native skill check disabled that sentinel;
+- an instance-owned sentinel skill remained enabled;
+- `account/login/start` with a synthetic API key wrote through the credential
+  bridge to the account owner, and the link survived;
+- re-preparing the same home preserved its private configuration.
 
-Apply the boundary to normal turns, one-shots (titles/reviews), delegates,
-CLI fallbacks, detection and skill discovery. Test restart and native-session
-recovery too. Do not globally disable all skills as a shortcut: the selected
-domain's skills still need to load. The installed Claude CLI's `--bare` also
-disables OAuth/keychain reads, so it is not a substitute for shared sign-in
-with private configuration.
+Claude Code **2.1.329** was exercised through ORX's production control-request
+path and an isolated test credential namespace. Its initialization response
+exposed the private sentinel skill and omitted the global sentinel skill.
+Neither native probe made a model request. These are real CLI configuration
+checks, not a simulated agent or an OAuth refresh test.
 
-## Acceptance checks for the remaining agent layer
+Reproduce after building the tests (binary locations are machine-specific):
 
-Give A and B different sentinel settings, instructions, skills, plugins,
-memory and env values, with a third sentinel in the user's global profile.
-Through each real adapter's inspection API and a bounded real turn, verify
-that A receives A's material only, B receives B's only, and both identify the
-intended shared account. Mutate A, restart both, and repeat. Confirm that
-native-session recovery does not resume B or a legacy user session. Exercise
-auth refresh and prove neither instance overwrites the other's state.
+```sh
+ORX_TEST_CODEX_BINARY="/absolute/path/to/codex" \
+ORX_TEST_CLAUDE_BINARY="/absolute/path/to/claude" \
+cargo test --locked --bin orx private_settings_real_ -- --ignored
+```
 
-These agent-layer acceptance checks have **not** been run. The current fork
-proves separate servers and native browser stores, not complete agent
-configuration isolation.
+Optional `ORX_ISOLATION_REPORT_FILE` and
+`ORX_CLAUDE_ISOLATION_REPORT_FILE` save the respective sanitized JSON reports.
+The tests run inside existing ORX temporary-home fixtures and never use real
+account credentials. Module tests also cover stale-policy rejection, atomic
+credential replacement by the owner, private env read/write/remove, exclusion
+of inherited provider variables and legacy-session lookup.
+
+## Remaining acceptance work
+
+This mode is an experimental configuration boundary, not yet a complete
+multi-instance product. Still unverified or unimplemented:
+
+- A normal model turn, restart/resume and parallel OAuth refresh using the
+  real shared accounts. The synthetic credential-write check does not prove
+  concurrent OAuth refresh or macOS Keychain behavior.
+- Codex accounts stored exclusively in the OS keyring. The current bridge
+  supports the `auth.json` account owner; a keyring-only account needs a
+  separate credential adapter.
+- Full exclusion of parent-directory instructions, enterprise-managed
+  configuration and shell startup files. Settings-source selection and
+  private homes are not proof that every native instruction source is gone.
+- A supervisor with a deliberately selected inherited environment, stable
+  port/UUID registry, lifecycle controls and recovery. Provider-variable
+  filtering is not a complete environment allowlist.
+- Production Finder multi-instance launching, Windows/Linux behavior and
+  Windows file-symlink availability. Previous native-window tests used the
+  debug desktop attachment entry point on macOS.
+
+Do not label this mode complete isolation until those checks are performed.
+The domain profile still changes guidance and bundled skills, not the research
+schema or the UI. The shared session repository/Atlas remains a separate,
+explicit source integration.

@@ -316,6 +316,9 @@ pub fn forget(key: &str) -> Result<()> {
 }
 
 pub fn create(harness: &str, name: &str, icon: Option<Value>) -> Result<String> {
+    if super::agent_isolation::enabled() {
+        bail!("Private agent settings currently use the shared default account. Select the default Claude or Codex account.");
+    }
     let prefix = match harness {
         "claude-code" => "claude",
         "codex" => "codex",
@@ -386,6 +389,9 @@ pub fn home(id: &str, harness: &str) -> Result<PathBuf> {
 }
 
 pub fn prepare(id: &str, harness: &str) -> Result<PathBuf> {
+    if super::agent_isolation::enabled() {
+        bail!("Private agent settings currently use the shared default account. Select the default Claude or Codex account.");
+    }
     let root = home(id, harness)?;
     prepare_home(&root, harness)?;
     Ok(root)

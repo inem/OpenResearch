@@ -1,7 +1,8 @@
 # Experimental domain profiles
 
 For multiple native windows, see [instance isolation](ISOLATION.md): tested
-window/data boundaries and the agent settings that are still shared.
+window/data boundaries, the opt-in private agent settings mode, and its
+remaining acceptance checks.
 
 A profile replaces the research playbook and selects which bundled skills
 are installed in chat worktrees. It also supplies files that agents can read

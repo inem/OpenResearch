@@ -43,10 +43,14 @@ static OVERRIDE: OnceLock<HashMap<&'static str, OsString>> = OnceLock::new();
 
 /// Like `env::var_os`, but preferring what the user's shell reported.
 pub fn var(key: &str) -> Option<OsString> {
-    let value = OVERRIDE
-        .get()
-        .and_then(|vars| vars.get(key).cloned())
-        .or_else(|| std::env::var_os(key));
+    let value = if super::agent_isolation::enabled() && key != "PATH" {
+        std::env::var_os(key)
+    } else {
+        OVERRIDE
+            .get()
+            .and_then(|vars| vars.get(key).cloned())
+            .or_else(|| std::env::var_os(key))
+    };
     #[cfg(test)]
     if value
         .as_deref()
@@ -322,6 +326,9 @@ fn candidate_names(binary: &str) -> Vec<String> {
 /// store while the app read the user's. PATH is excluded — callers set it
 /// themselves, some of them prepending this binary's own directory first.
 pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
+    if super::agent_isolation::enabled() {
+        return;
+    }
     let Some(vars) = OVERRIDE.get() else {
         return;
     };

@@ -394,11 +394,15 @@ async fn codex_rpc(
     method: &str,
     params: Value,
 ) -> std::result::Result<Value, Unanswered> {
-    let (bin, home, method) = (
-        bin.to_path_buf(),
-        home.map(Path::to_path_buf),
-        method.to_string(),
-    );
+    let home = if crate::local::agent_isolation::enabled() && home.is_none() {
+        Some(
+            native_store::prepare_codex(NativeStore::Isolated)
+                .map_err(|error| Unanswered::Spawn(std::io::Error::other(error.to_string())))?,
+        )
+    } else {
+        home.map(Path::to_path_buf)
+    };
+    let (bin, method) = (bin.to_path_buf(), method.to_string());
     // Detached: a caller that gives up must not drop, and so kill, a child saving a sign-in.
     let (answered, answer) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -415,6 +419,9 @@ async fn codex_rpc(
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         prepare_env(&mut cmd);
+        if crate::local::agent_isolation::enabled() {
+            cmd.args(["-c", "cli_auth_credentials_store=\"file\""]);
+        }
         if let Some(home) = &home {
             cmd.env("CODEX_HOME", home);
         }
@@ -1423,10 +1430,14 @@ async fn codex_exec_one_shot(
     let sqlite = native_store::codex_home(NativeStore::Isolated);
     // A one-shot brings its own context: the user's AGENTS.md and skills would add
     // thousands of tokens to every request.
-    cmd.env(
-        "CODEX_HOME",
-        native_store::prepare_codex_one_shot(&home, name)?,
-    );
+    let one_shot_home = native_store::prepare_codex_one_shot(&home, name)?;
+    if crate::local::agent_isolation::enabled() {
+        crate::local::codex::prepare_private_one_shot(bin, &one_shot_home).await?;
+        cmd.args(["-c", "cli_auth_credentials_store=\"file\""]);
+        cmd.args(["-c", "project_doc_max_bytes=0"]);
+        cmd.current_dir(&one_shot_home);
+    }
+    cmd.env("CODEX_HOME", one_shot_home);
     cmd.args([
         "-c",
         &format!("sqlite_home={}", native_store::toml_string(&sqlite)),
@@ -1591,7 +1602,8 @@ impl Codex {
         // and their answer decides whether the app-server catalog child is
         // worth spawning at all.
         let home = native_store::codex_home(NativeStore::Legacy);
-        let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
+        let settings_home = native_store::codex_home(crate::local::agent_isolation::config_store());
+        let config_raw = std::fs::read_to_string(settings_home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
         let configured_effort = config_raw.as_deref().and_then(parse_configured_effort);
 
@@ -1920,6 +1932,9 @@ impl Harness for Codex {
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         if !runs_app_server().await {
+            if crate::local::agent_isolation::enabled() {
+                return Err(TurnFailure::adapter(anyhow!("Private agent settings require Codex app-server; update Codex and unset ORX_CODEX_EXEC."), DeliveryState::NotSent));
+            }
             let result = run_turn_exec(ctx).await;
             // Still `Unknown` after a failure means codex died before its first
             // event — nothing was delivered, so the card must offer Retry, not a
@@ -2092,10 +2107,15 @@ impl Harness for Codex {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(native_store::codex_home(NativeStore::Legacy))
+        Some(native_store::codex_home(
+            crate::local::agent_isolation::config_store(),
+        ))
     }
 
     fn native_skill_roots(&self) -> Vec<PathBuf> {
+        if crate::local::agent_isolation::enabled() {
+            return vec![native_store::codex_home(NativeStore::Isolated).join("skills")];
+        }
         [
             crate::config::home_dir().map(|home| home.join(".agents/skills")),
             self.config_home().map(|home| home.join("skills")),
@@ -2142,7 +2162,7 @@ impl Harness for Codex {
     fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
         type Inventory = (std::time::Instant, PathBuf, Vec<(String, PathBuf)>);
         static CACHE: std::sync::Mutex<Option<Inventory>> = std::sync::Mutex::new(None);
-        let home = native_store::codex_home(NativeStore::Legacy);
+        let home = native_store::codex_home(crate::local::agent_isolation::config_store());
         let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((at, cached_home, dirs)) = &*cache {
             if *cached_home == home && at.elapsed() < Duration::from_secs(60) {
@@ -3751,6 +3771,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+    if crate::local::agent_isolation::enabled() {
+        crate::local::codex::restrict_instance_skills(&client, &repo).await?;
+    }
     let config_client = client.clone();
     // Bypass needs the configuration only to avoid MCP server name collisions.
     let mut config = match codex_turn_config(&client, &repo).await {

@@ -760,6 +760,9 @@ fn spawn_client(
 ) -> Result<Arc<CodexClient>> {
     let mut cmd = crate::process::tokio_command(&bin);
     cmd.arg("app-server");
+    if super::agent_isolation::enabled() {
+        cmd.args(["-c", "cli_auth_credentials_store=\"file\""]);
+    }
     if let Some(override_arg) =
         native_store::codex_sqlite_override(native_store, &codex_home, profile.is_some())
     {
@@ -868,6 +871,81 @@ async fn handshake(client: &CodexClient) -> Result<()> {
         }
     }
     client.write_line(&json!({ "method": "initialized" })).await
+}
+
+/// Codex also scans the OS user's .agents directory independently of its config home.
+pub(crate) async fn restrict_instance_skills(client: &CodexClient, workspace: &Path) -> Result<()> {
+    let root = crate::paths::canonicalize(crate::store::data_dir())?;
+    for pass in 0..2 {
+        let response = client
+            .request(
+                "skills/list",
+                json!({"cwds":[workspace],"forceReload":true}),
+            )
+            .await?;
+        let rows = response["data"].as_array().ok_or_else(|| {
+            anyhow!("Codex did not return its skill inventory; private settings cannot be verified")
+        })?;
+        if rows.is_empty() {
+            return Err(anyhow!("Codex returned no workspace skill inventory"));
+        }
+        let mut outside = Vec::new();
+        for row in rows {
+            let errors = row["errors"]
+                .as_array()
+                .ok_or_else(|| anyhow!("Codex skill inventory has no error status"))?;
+            if !errors.is_empty() {
+                return Err(anyhow!("Codex could not inspect all skills in this workspace; fix its skill files before using private settings"));
+            }
+            let skills = row["skills"]
+                .as_array()
+                .ok_or_else(|| anyhow!("Codex skill inventory has no skills list"))?;
+            for skill in skills {
+                let enabled = skill["enabled"].as_bool().ok_or_else(|| {
+                    anyhow!("This Codex version does not report whether skills are enabled")
+                })?;
+                if !enabled {
+                    continue;
+                }
+                let path = skill["path"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Codex skill inventory has no skill path"))?;
+                if !crate::paths::canonicalize(Path::new(path))?.starts_with(&root) {
+                    outside.push(path.to_owned());
+                }
+            }
+        }
+        if outside.is_empty() {
+            return Ok(());
+        }
+        if pass == 1 {
+            return Err(anyhow!("Codex still enables skills outside this instance after disabling them; the turn was not started"));
+        }
+        for path in outside {
+            client
+                .request("skills/config/write", json!({"path":path,"enabled":false}))
+                .await?;
+        }
+    }
+    unreachable!()
+}
+
+pub(crate) async fn prepare_private_one_shot(bin: &Path, home: &Path) -> Result<()> {
+    let client = spawn_client(
+        "private-settings-check",
+        None,
+        NativeStore::Isolated,
+        None,
+        bin.to_path_buf(),
+        home.to_path_buf(),
+    )?;
+    let result = async {
+        handshake(&client).await?;
+        restrict_instance_skills(&client, home).await
+    }
+    .await;
+    client.terminate().await;
+    result
 }
 
 /// The `orx up` codex host: one `codex app-server` child per chat session,
@@ -1414,6 +1492,82 @@ mod windows_job {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "diagnostic: requires ORX_TEST_CODEX_BINARY; no model requests or real credentials"]
+    fn private_settings_real_codex_probe() {
+        if !crate::config::in_test_child(&[]) {
+            return;
+        }
+        std::env::set_var("ORX_PRIVATE_AGENT_SETTINGS", "1");
+        let bin = PathBuf::from(
+            std::env::var_os("ORX_TEST_CODEX_BINARY").expect("ORX_TEST_CODEX_BINARY"),
+        );
+        let root = crate::config::test_home();
+        let native_user_root =
+            crate::config::test_contained(PathBuf::from(std::env::var_os("HOME").unwrap()));
+        let global_skill = native_user_root.join(".agents/skills/outside-sentinel");
+        std::fs::create_dir_all(&global_skill).unwrap();
+        std::fs::write(global_skill.join("SKILL.md"), "---\nname: outside-sentinel\ndescription: Synthetic global skill used only by an isolation diagnostic.\n---\nGlobal sentinel.\n").unwrap();
+        let owner = native_store::codex_home(NativeStore::Legacy);
+        std::fs::create_dir_all(&owner).unwrap();
+        std::fs::write(
+            owner.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-synthetic-owner"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            owner.join("config.toml"),
+            "model_reasoning_effort = 'xhigh'\n",
+        )
+        .unwrap();
+        let workspace = root.join("probe-workspace");
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let reports = runtime.block_on(async {
+            let mut reports = Vec::new();
+            for (name, effort) in [("a", "low"), ("b", "high")] {
+                let home = crate::store::data_dir().join("agents").join(name);
+                native_store::prepare_codex_links(&home, &owner, true).unwrap();
+                std::fs::create_dir_all(home.join("skills/inside-sentinel")).unwrap();
+                std::fs::write(home.join("skills/inside-sentinel/SKILL.md"), "---\nname: inside-sentinel\ndescription: Synthetic instance-owned skill.\n---\nInstance sentinel.\n").unwrap();
+                std::fs::write(home.join("config.toml"), format!("model_reasoning_effort = '{effort}'\ncli_auth_credentials_store = 'file'\n")).unwrap();
+                let client = spawn_client("isolation-probe", None, NativeStore::Isolated, None, bin.clone(), home.clone()).unwrap();
+                let result: Result<Value> = async {
+                    handshake(&client).await?;
+                    let config = client.request("config/read", json!({"cwd":workspace,"includeLayers":false})).await?;
+                    let skills = client.request("skills/list", json!({"cwds":[workspace],"forceReload":true})).await?;
+                    restrict_instance_skills(&client, &workspace).await?;
+                    let filtered_skills = client.request("skills/list", json!({"cwds":[workspace],"forceReload":true})).await?;
+                    let login = client.request("account/login/start", json!({"type":"apiKey","apiKey":format!("sk-synthetic-{name}")})).await?;
+                    let auth: Value = serde_json::from_slice(&std::fs::read(owner.join("auth.json"))?)?;
+                    let shared_write = auth["OPENAI_API_KEY"] == format!("sk-synthetic-{name}");
+                    let global_skill_loaded = skills["data"].as_array().is_some_and(|data| data.iter().any(|row| row["skills"].as_array().is_some_and(|skills| skills.iter().any(|skill| skill["name"] == "outside-sentinel" && skill["enabled"] != false))));
+                    Ok(json!({"instance":name,"expected_effort":effort,"observed_effort":config["config"]["model_reasoning_effort"],"auth_write_reached_owner":shared_write,"auth_link_survived":home.join("auth.json").is_symlink(),"global_skill_loaded_before":global_skill_loaded,"instance_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "inside-sentinel" && skill["enabled"] == true)),"global_skill_enabled_after":filtered_skills["data"].as_array().unwrap().iter().any(|row| row["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "outside-sentinel" && skill["enabled"] == true)),"login_succeeded":login.get("type").is_some()}))
+                }.await;
+                client.terminate().await;
+                native_store::prepare_codex_links(&home, &owner, true).unwrap();
+                reports.push(result.unwrap());
+            }
+            reports
+        });
+        let report = json!({"model_calls":0,"credentials":"synthetic only","instances":reports});
+        if let Some(path) = std::env::var_os("ORX_ISOLATION_REPORT_FILE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        for row in &reports {
+            assert_eq!(row["expected_effort"], row["observed_effort"]);
+            assert_eq!(
+                row["auth_write_reached_owner"], true,
+                "native credential writes must follow the bridge"
+            );
+            assert_eq!(row["auth_link_survived"], true);
+            assert_eq!(row["global_skill_loaded_before"], true);
+            assert_eq!(row["global_skill_enabled_after"], false);
+            assert_eq!(row["instance_skill_enabled_after"], true);
+        }
+    }
 
     #[cfg(windows)]
     use std::os::windows::io::OwnedHandle;

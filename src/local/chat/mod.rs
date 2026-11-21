@@ -10617,13 +10617,32 @@ fn child_path() -> Option<std::ffi::OsString> {
 /// starting order — [`PATH_GUARD`] is what holds it once the child's shell reads
 /// a user profile.
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
+    let private = crate::local::agent_isolation::enabled();
+    if private {
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if [
+                "CLAUDE_",
+                "ANTHROPIC_",
+                "CODEX_",
+                "OPENAI_",
+                "OPENCODE_",
+                "CURSOR_",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            {
+                cmd.env_remove(key);
+            }
+        }
+    }
     if let Some(path) = child_path() {
         cmd.env("PATH", path);
     }
     // Agents open browsers and editors themselves.
     crate::local::shell_env::restore_host_gui_env(cmd.as_std_mut());
     for (key, value) in crate::config::list_synced_env() {
-        if crate::local::shell_env::var(&key).is_none() {
+        if private || crate::local::shell_env::var(&key).is_none() {
             cmd.env(key, value);
         }
     }

@@ -903,6 +903,9 @@ async fn spawn_client(
     // its lifetime is managed by the host reaper and explicit stop paths, not
     // by dropping a per-turn handle.
     .kill_on_drop(true);
+    if crate::local::agent_isolation::enabled() {
+        cmd.args(["--setting-sources", "user", "--strict-mcp-config"]);
+    }
     if let Some(model) = &spec.config.model {
         cmd.args(["--model", model]);
     }

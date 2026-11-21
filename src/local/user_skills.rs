@@ -512,6 +512,9 @@ fn discover_mirrored() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
     let mut out = Vec::new();
     let mut reports = Vec::new();
     for harness in registry() {
+        if super::agent_isolation::enabled() && !matches!(harness.id(), "claude-code" | "codex") {
+            continue;
+        }
         if harness.session_skills_dir().is_none() {
             continue;
         }

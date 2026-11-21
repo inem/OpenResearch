@@ -601,7 +601,7 @@ pub fn cursor_session(native_id: &str) -> Result<Option<NativeSessionLocation>> 
         (NativeStore::Isolated, isolated.clone()),
         (NativeStore::Legacy, cursor_home(NativeStore::Legacy)),
     ] {
-        if store == NativeStore::Legacy && root == isolated {
+        if store == NativeStore::Legacy && (root == isolated || super::agent_isolation::enabled()) {
             continue;
         }
         let path = match cursor_session_path(&root, native_id) {
@@ -663,7 +663,7 @@ fn session_location(
         (NativeStore::Isolated, isolated.clone()),
         (NativeStore::Legacy, home(NativeStore::Legacy)),
     ] {
-        if store == NativeStore::Legacy && root == isolated {
+        if store == NativeStore::Legacy && (root == isolated || super::agent_isolation::enabled()) {
             continue;
         }
         for tree in trees {
@@ -727,6 +727,7 @@ pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
 }
 
 pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
+    super::agent_isolation::reject_legacy(store)?;
     let root = claude_home(store);
     let legacy = claude_home(NativeStore::Legacy);
     if store == NativeStore::Legacy || root == legacy {
@@ -790,6 +791,19 @@ pub(crate) fn prepare_claude_links(
     legacy: &Path,
     config: Option<&Path>,
 ) -> Result<()> {
+    if super::agent_isolation::enabled() {
+        let auth = legacy.join(".credentials.json");
+        super::agent_isolation::prepare_home(root, config.map(|_| auth.as_path()))?;
+        let account = root.join(".claude.json");
+        if !account.try_exists()? {
+            crate::local::git::atomic_write_with_mode(
+                &account,
+                b"{\"hasCompletedOnboarding\":true}\n",
+                Some(0o600),
+            )?;
+        }
+        return Ok(());
+    }
     let mut sources = [
         "settings.json",
         "settings.local.json",
@@ -806,6 +820,7 @@ pub(crate) fn prepare_claude_links(
 }
 
 pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
+    super::agent_isolation::reject_legacy(store)?;
     let root = codex_home(store);
     let legacy = codex_home(NativeStore::Legacy);
     if store == NativeStore::Legacy || same_home(&root, &legacy) {
@@ -817,6 +832,10 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
 }
 
 pub(crate) fn prepare_codex_links(root: &Path, legacy: &Path, share_auth: bool) -> Result<()> {
+    if super::agent_isolation::enabled() {
+        let auth = legacy.join("auth.json");
+        return super::agent_isolation::prepare_home(root, share_auth.then_some(auth.as_path()));
+    }
     std::fs::create_dir_all(root)?;
     let isolated = crate::paths::canonicalize(root)?;
     let mut sources = child_paths(legacy)?;

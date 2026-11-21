@@ -8,6 +8,7 @@
 //! project registered in the local store.
 
 pub mod acp;
+pub(crate) mod agent_isolation;
 pub mod agent_lifecycle;
 pub mod agent_profiles;
 pub mod agent_skills;

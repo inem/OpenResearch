@@ -322,6 +322,12 @@ pub async fn run() {
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
+    if let Err(error) =
+        crate::local::domain_profile::check_data_dir(&crate::store::data_dir(), true)
+    {
+        crate::show_error_dialog(&error.to_string());
+        return;
+    }
     if let Err(error) = crate::local::storage::prepare().await {
         eprintln!("OpenResearch storage: {error}");
         crate::show_error_dialog(&error.to_string());
@@ -511,7 +517,7 @@ fn adopt_probe(
         Some(mut vars) => {
             // The other imports pick directories already in use; switching them mid-session
             // would split state between the old and new directories.
-            if late {
+            if late || crate::local::agent_isolation::enabled() {
                 vars.retain(|key, _| *key == "PATH");
             }
             let adopted: Vec<String> = crate::local::shell_env::IMPORTED
@@ -1063,8 +1069,8 @@ mod imp {
                 Some(value) => value.to_str()
                     .ok_or_else(|| crate::error::anyhow!("ORX_DESKTOP_INSTANCE_ID must be UTF-8"))
                     .and_then(|value| super::desktop_instance_id(Some(value))),
-                None if std::env::var_os("ORX_AGENT_PROFILE").is_some() => Err(crate::error::anyhow!(
-                    "A custom desktop profile needs a persistent ORX_DESKTOP_INSTANCE_ID to keep its browser data separate."
+                None if std::env::var_os("ORX_AGENT_PROFILE").is_some() || crate::local::agent_isolation::enabled() => Err(crate::error::anyhow!(
+                    "A private or custom-profile desktop instance needs a persistent ORX_DESKTOP_INSTANCE_ID to keep its browser data separate."
                 )),
                 None => Ok(None),
             };
